@@ -35,3 +35,8 @@ Rules:
 The recompiler also reads/writes a minimal line-based v1 format from
 its runtime recorder; the formats are content-detected and
 interchangeable through `recomp labels import/export`.
+
+Verification status and evidence are **not** stored here. They live in
+the `<stem>.evidence.jsonl` sidecar (see [evidence-model.md](evidence-model.md)).
+Do not add `status` fields to this format.
+

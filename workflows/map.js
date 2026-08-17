@@ -205,10 +205,16 @@ Discipline (AGENTS.md governs; target ~8 tool calls):
    hand following this tree's existing conventions: shrink the covering .incbin,
    add the object to the linker script in ROM address order.
 4. Verify: ${cd}make check | tail -3 MUST pass. If it fails, revert everything
-   (git checkout/clean if a repo) and return status=blocked with the detail.
+   (git checkout/clean if a repo) and run
+   ${cd}python3 ${mapper}/tools/evidence.py clear-range --rom <rom> --start ${target.address} --mode ${target.mode}
+   so no RANGE_VERIFIED remains; return status=blocked with the detail.
    There is NO SUCH THING as an expected mismatch — a red oracle is never
    committed, never rationalized.
-5. Commit: if the tree is a git repository, commit the peel as one commit
+5. Record range: ONLY after make check is green:
+   ${cd}python3 ${mapper}/tools/evidence.py record-range --rom <rom> --start <addr> --end <end> --mode <mode> --name <name>
+   This re-runs make check and writes RANGE_VERIFIED only if SHA-256 matches.
+   Never run it before make check. peel.py does not record RANGE_VERIFIED.
+6. Commit: if the tree is a git repository, commit the peel as one commit
    (message: "peel: <name> [<start>, <end>)"). Never name commercial titles.
    BEFORE committing, confirm the labels TOML contains this function's
    entry (peel.py records it, but a revert-and-rewire loses the record —
@@ -359,3 +365,4 @@ return {
   blocked: results.filter(r => r.status === 'blocked'),
   report,
 }
+

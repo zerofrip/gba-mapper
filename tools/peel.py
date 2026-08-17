@@ -22,7 +22,9 @@ After running, the caller still must:
   1. Shrink the surrounding INCBIN (asm/rom.s or neighbors) so the
      peeled bytes aren't included twice.
   2. Add the new .o to linker.ld in address order.
-  3. `make check` — must still report an identical image.
+  3. `make check` — SHA-256 of the rebuilt image vs the pinned ROM.
+  4. Only then record RANGE_VERIFIED (`tools/evidence.py record-range`).
+     peel.py itself never writes the evidence sidecar.
 
 Usage:
   python3 tools/peel.py --start 0x080000c0 --end 0x080000f0 --mode thumb
@@ -202,3 +204,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+

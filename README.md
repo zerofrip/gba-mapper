@@ -62,17 +62,18 @@ python3 tools/setup.py                 # phase 0 — make check passes by constr
 
 Each run peels up to `maxFunctions` verified functions and stops;
 state lives in the tree (the harness + the labels TOML), so re-running
-resumes exactly where the last run stopped. To continue a decomp that
-already exists, preseed the same state file from its built ELF:
+resumes exactly where the last run stopped. To import function *candidates* from an existing decomp ELF (unverified
+`decomp-reference` evidence, not a mapping):
 
 ```sh
 python3 tools/seed_from_decomp.py --elf game.elf --rom baserom.gba
 ```
 
-The seed writes the identical `<rom stem>.labels.toml` the workflow
-maintains — preseeding and resuming are the same mechanism. Pointing
-the workflow at an external tree (its own harness, e.g. an existing
-decomp project) works via `args: {tree: "...", mapper: "<this repo>"}`.
+That writes `<rom stem>.evidence.jsonl` with `status = unresolved`. It
+does not write `labels.toml`. Each candidate still has to be peeled and
+verified. Pointing the workflow at an external tree (its own harness,
+e.g. an existing decomp project) works via
+`args: {tree: "...", mapper: "<this repo>"}`.
 
 Status: tools ported and verified (the boundary detector matches the
 pilot's TS implementation output-for-output; the full bootstrap → peel

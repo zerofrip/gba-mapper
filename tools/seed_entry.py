@@ -36,6 +36,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import boundary
+import evidence
 import labels_toml
 from peel import find_rom
 
@@ -189,6 +190,9 @@ def main() -> int:
             run(["git", "clean", "-fdq", "asm"], cwd=tree, capture_output=True)
         if lpath.exists():
             lpath.unlink()
+        evidence.clear_range_verified(
+            evidence.sidecar_path(lpath), labels_toml.rom_sha256(rom), addr, mode,
+        )
         sys.stderr.write(reason + "\n")
         return 1
 
@@ -207,9 +211,17 @@ def main() -> int:
     if chk.returncode != 0:
         sys.stderr.write(chk.stderr)
         return revert("make check RED after seed — reverted; seed the entry by hand")
+    evidence.record_range_after_check(
+        True,
+        evidence.sidecar_path(lpath),
+        labels_toml.rom_sha256(rom),
+        addr, mode, end, name,
+        source="seed_entry",
+    )
     print(f"seed: mapped {name} and verified byte-identity — frontier is now productive")
     return 0
 
 
 if __name__ == "__main__":
     sys.exit(main())
+

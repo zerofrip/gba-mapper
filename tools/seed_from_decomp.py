@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
-"""Preseed the map from an existing decomp: harvest every typed
-function symbol out of the built ELF and write the working
-`<rom stem>.labels.toml`.
+"""Harvest FUNC symbols from a decomp ELF as unverified candidates.
 
-The decomp's linker already proved these (the tree builds a
-byte-identical image), so each FUNC symbol is a verified function:
-address, size (when recorded), name, and CPU state (ARM ELF function
-symbols carry the Thumb bit in st_value). The output is exactly the
-file the mapping workflow maintains — preseeding and resuming are the
-same mechanism.
+Decompilation repositories are benchmark/reference evidence, not a
+verification authority. ELF symbols become sidecar records:
+
+    status = unresolved
+    evidence.type = decomp-reference
+
+They do NOT enter labels.toml. Each candidate still has to go through
+the normal peel / RANGE_VERIFIED / ENCODING_VERIFIED pipeline.
 
 Usage:
-  python3 tools/seed_from_decomp.py --elf frog.elf --rom baserom.gba
-  python3 tools/seed_from_decomp.py --elf frog.elf --rom baserom.gba --out map.labels.toml
+  python3 tools/seed_from_decomp.py --elf game.elf --rom baserom.gba
+  python3 tools/seed_from_decomp.py --elf game.elf --rom baserom.gba \\
+      --out game.evidence.jsonl
 """
 from __future__ import annotations
 
@@ -23,6 +24,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import evidence
 import labels_toml
 from labels_toml import Fn, ROM_BASE
 
@@ -61,50 +63,82 @@ def harvest(elf: Path, readelf: str) -> list[tuple[Fn, str]]:
     return out
 
 
-def main() -> int:
-    p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    p.add_argument("--elf", required=True, type=Path)
-    p.add_argument("--rom", required=True, type=Path)
-    p.add_argument("--out", type=Path,
-                   help="output TOML (default: <rom stem>.labels.toml beside the ROM)")
-    p.add_argument("--readelf", default="arm-none-eabi-readelf")
-    a = p.parse_args()
-
-    rom_size = a.rom.stat().st_size
-    syms = harvest(a.elf, a.readelf)
-
-    fns: dict[tuple[int, str], Fn] = {}
+def candidates_from_harvest(
+    syms: list[tuple[Fn, str]], rom_size: int,
+) -> tuple[dict[tuple[int, str], evidence.Record], dict[str, int]]:
+    """Turn harvested FUNC symbols into unresolved decomp-reference records."""
+    recs: dict[tuple[int, str], evidence.Record] = {}
     kept = dropped = dupes = 0
     for fn, bind in syms:
         if not (ROM_BASE <= fn.address < ROM_BASE + rom_size):
             dropped += 1
             continue
-        key = (fn.address, fn.mode)
-        if key in fns:
+        rec = evidence.Record(
+            address=fn.address,
+            mode=fn.mode,
+            status=evidence.UNRESOLVED,
+            end=fn.end,
+            name=fn.name,
+            evidence=[evidence.Evidence(
+                type="decomp-reference",
+                source="seed_from_decomp",
+                detail=(
+                    f"elf FUNC {fn.name or '?'} bind={bind} "
+                    f"size={0 if fn.end is None else fn.end - fn.address}"
+                ),
+            )],
+        )
+        key = rec.key()
+        if key in recs:
             dupes += 1
-            # Prefer the global/longer-named alias for the same entry.
-            if bind == "GLOBAL" or (fns[key].name or "").startswith("sub_"):
-                fns[key] = fn
+            old = recs[key]
+            prefer = bind == "GLOBAL" or (old.name or "").startswith("sub_")
+            recs[key] = evidence.merge_evidence(rec if prefer else old, old if prefer else rec)
+            recs[key].status = evidence.UNRESOLVED
             continue
-        fns[key] = fn
+        recs[key] = rec
         kept += 1
+    return recs, {"kept": kept, "dropped": dropped, "dupes": dupes}
 
-    out = a.out or labels_toml.state_path(a.rom)
+
+def main() -> int:
+    p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    p.add_argument("--elf", required=True, type=Path)
+    p.add_argument("--rom", required=True, type=Path)
+    p.add_argument("--out", type=Path,
+                   help="evidence sidecar (default: <rom stem>.evidence.jsonl)")
+    p.add_argument("--readelf", default="arm-none-eabi-readelf")
+    a = p.parse_args()
+
+    if a.out is not None and a.out.name.endswith(".labels.toml"):
+        print(
+            "ERROR: decomp seeds are not verified mappings; "
+            "refusing to write labels.toml. Use --out <stem>.evidence.jsonl",
+            file=sys.stderr,
+        )
+        return 1
+
+    rom_size = a.rom.stat().st_size
+    sha = labels_toml.rom_sha256(a.rom)
+    recs, stats = candidates_from_harvest(harvest(a.elf, a.readelf), rom_size)
+
+    out = a.out or evidence.sidecar_path_for_rom(a.rom)
     existing = 0
     if out.exists():
-        sha, prev = labels_toml.load(out)
-        if sha != labels_toml.rom_sha256(a.rom):
-            print(f"ERROR: {out} is for a different image", file=sys.stderr)
-            return 1
+        _, prev = evidence.load(out, expected_sha=sha)
         existing = len(prev)
-        for key, fn in prev.items():
-            fns.setdefault(key, fn)
+        for key, rec in recs.items():
+            evidence.upsert(out, sha, rec)
+        # upsert one-by-one already saved; recount
+        _, recs = evidence.load(out, expected_sha=sha)
+    else:
+        evidence.save(out, sha, recs)
 
-    labels_toml.save(out, labels_toml.rom_sha256(a.rom), fns)
     print(
-        f"seeded {out}: {len(fns)} functions "
-        f"({kept} from ELF, {existing} pre-existing, {dupes} alias dupes, "
-        f"{dropped} outside ROM)"
+        f"seeded {out}: {len(recs)} unresolved candidates "
+        f"(decomp-reference; not verified; not written to labels.toml) "
+        f"({stats['kept']} from ELF, {existing} pre-existing sidecar, "
+        f"{stats['dupes']} alias dupes, {stats['dropped']} outside ROM)"
     )
     return 0
 
