@@ -68,4 +68,12 @@ ARMv4T decode does not produce it. See [phase2-arm-thumb.md](phase2-arm-thumb.md
   are unmapped may appear as frontier candidates. That is discovery,
   not RANGE_VERIFIED or ENCODING_VERIFIED.
 
+## Producers in Phase 4
+
+- `tools/import_ghidra.py` — Ghidra JSON/JSONL → `ghidra-seed` /
+  `source=ghidra` frontier candidates. STATIC_ANALYSIS_ORACLE only:
+  does **not** write labels.toml, the sidecar, or gamedb, and does
+  **not** produce RANGE_VERIFIED or ENCODING_VERIFIED. See
+  [phase4-ghidra-import.md](phase4-ghidra-import.md).
+
 
