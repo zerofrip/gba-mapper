@@ -83,11 +83,13 @@ class Evidence:
     target_addr: int | None = None
     source_mode: str | None = None
     target_mode: str | None = None
+    insn: str | None = None
 
     def key(self) -> tuple:
         return (
             self.type, self.source, self.detail, self.from_addr,
             self.target_addr, self.source_mode, self.target_mode,
+            self.insn,
         )
 
     def to_json(self) -> dict:
@@ -100,6 +102,8 @@ class Evidence:
             d["source_mode"] = self.source_mode
         if self.target_mode is not None:
             d["target_mode"] = self.target_mode
+        if self.insn is not None:
+            d["insn"] = self.insn
         return d
 
     @classmethod
@@ -109,6 +113,7 @@ class Evidence:
                 return None
             return _parse_addr(raw[k])
 
+        insn = raw.get("insn")
         return cls(
             type=str(raw.get("type") or ""),
             source=str(raw.get("source") or ""),
@@ -117,6 +122,7 @@ class Evidence:
             target_addr=opt_addr("target_addr"),
             source_mode=raw.get("source_mode"),
             target_mode=raw.get("target_mode"),
+            insn=str(insn) if insn is not None else None,
         )
 
 
@@ -464,4 +470,5 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+
 

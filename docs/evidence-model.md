@@ -49,7 +49,7 @@ A `sha256` mismatch against the image is an error.
 `literal-pool`, `jump-table`, `indirect-branch`, `vector-entry`.
 
 Unknown types are preserved. Optional evidence fields (absent on
-Phase 1 records): `target_addr`, `source_mode`, `target_mode`.
+Phase 1 records): `target_addr`, `source_mode`, `target_mode`, `insn`.
 
 Do not rename existing type strings. `blx-target` is reserved;
 ARMv4T decode does not produce it. See [phase2-arm-thumb.md](phase2-arm-thumb.md).
@@ -59,4 +59,13 @@ ARMv4T decode does not produce it. See [phase2-arm-thumb.md](phase2-arm-thumb.md
 - `tools/peel.py` — writes `.incbin` + labels.toml only. Does **not** record RANGE_VERIFIED.
 - `make check` then `tools/evidence.py record-range` (workflow / `seed_entry.py`) — SHA-256 match → `range_verified` + `peel-incbin`
 - `tools/seed_from_decomp.py` — ELF FUNC symbols → `unresolved` + `decomp-reference`; **does not write labels.toml**
+
+## Producers in Phase 3
+
+- `tools/frontier.py` — stdout JSON candidates with `evidence_items`;
+  does **not** write the sidecar. See [phase3-frontier-provenance.md](phase3-frontier-provenance.md).
+  Unresolved sidecar records (`decomp-reference`, `manual-seed`) that
+  are unmapped may appear as frontier candidates. That is discovery,
+  not RANGE_VERIFIED or ENCODING_VERIFIED.
+
 
