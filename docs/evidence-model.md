@@ -84,4 +84,11 @@ ARMv4T decode does not produce it. See [phase2-arm-thumb.md](phase2-arm-thumb.md
   sidecar, or gamedb, and does **not** produce RANGE_VERIFIED or
   ENCODING_VERIFIED. See [phase5-evidence-merge.md](phase5-evidence-merge.md).
 
+## Producers in Phase 6
+
+- `tools/adjudicate.py` — read-only disposition / sources / classes on
+  frontier JSON. **disposition != status**; **peel-ready !=
+  RANGE_VERIFIED**. Does **not** write labels.toml, the sidecar, or
+  gamedb. See [phase6-adjudication.md](phase6-adjudication.md).
+
 
