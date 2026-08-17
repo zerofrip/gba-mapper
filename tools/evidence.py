@@ -63,6 +63,10 @@ EVIDENCE_TYPES = (
     "encoding-roundtrip",
     "skip-audit",
     "peel-incbin",
+    "literal-pool",
+    "jump-table",
+    "indirect-branch",
+    "vector-entry",
 )
 
 
@@ -76,23 +80,43 @@ class Evidence:
     source: str
     detail: str
     from_addr: int | None = None
+    target_addr: int | None = None
+    source_mode: str | None = None
+    target_mode: str | None = None
 
     def key(self) -> tuple:
-        return (self.type, self.source, self.detail, self.from_addr)
+        return (
+            self.type, self.source, self.detail, self.from_addr,
+            self.target_addr, self.source_mode, self.target_mode,
+        )
 
     def to_json(self) -> dict:
         d: dict = {"type": self.type, "source": self.source, "detail": self.detail}
         if self.from_addr is not None:
             d["from_addr"] = _hex(self.from_addr)
+        if self.target_addr is not None:
+            d["target_addr"] = _hex(self.target_addr)
+        if self.source_mode is not None:
+            d["source_mode"] = self.source_mode
+        if self.target_mode is not None:
+            d["target_mode"] = self.target_mode
         return d
 
     @classmethod
     def from_json(cls, raw: dict) -> Evidence:
+        def opt_addr(k: str) -> int | None:
+            if k not in raw or raw[k] is None:
+                return None
+            return _parse_addr(raw[k])
+
         return cls(
             type=str(raw.get("type") or ""),
             source=str(raw.get("source") or ""),
             detail=str(raw.get("detail") or ""),
-            from_addr=_parse_addr(raw["from_addr"]) if "from_addr" in raw and raw["from_addr"] is not None else None,
+            from_addr=opt_addr("from_addr"),
+            target_addr=opt_addr("target_addr"),
+            source_mode=raw.get("source_mode"),
+            target_mode=raw.get("target_mode"),
         )
 
 
@@ -440,3 +464,4 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+

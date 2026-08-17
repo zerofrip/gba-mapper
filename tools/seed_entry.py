@@ -125,27 +125,6 @@ def resolve_entry(rom_bytes: bytes, rom: Path, objdump: str) -> tuple[int, str, 
                      "non-standard crt0; seed the entry by hand with peel.py")
 
 
-def arm_end(rom: Path, start: int, objdump: str) -> int:
-    """Conservative ARM function end: first epilogue (bx lr / ldm ..pc /
-    unconditional b) + 4. Byte-identity holds regardless via incbin; the
-    loop's audit refines if needed. Only used for the rare ARM entry."""
-    text = objdump_arm(rom, start, start + 0x2000, objdump)
-    last = None
-    for line in text.splitlines():
-        m = re.match(r"\s*([0-9a-f]+):\s+[0-9a-f]{8}\s+(\S+)\s*(.*)$", line, re.I)
-        if not m:
-            continue
-        addr, mn, ops = int(m.group(1), 16), m.group(2).lower(), m.group(3).lower()
-        if mn == "bx" and "lr" in ops:
-            return addr + 4
-        if mn in ("b",) and "0x" in ops:
-            return addr + 4
-        if mn.startswith("ldm") and "pc" in ops:
-            return addr + 4
-        last = addr
-    return (last + 4) if last else start + 4
-
-
 def run(cmd: list[str], **kw) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, text=True, **kw)
 
@@ -174,8 +153,10 @@ def main() -> int:
 
     rom_bytes = rom.read_bytes()
     addr, mode, how = resolve_entry(rom_bytes, rom, a.objdump)
-    end = (boundary.detect_boundary(rom, addr, objdump=a.objdump)["recommendedEnd"]
-           if mode == "thumb" else arm_end(rom, addr, a.objdump))
+    if mode == "thumb":
+        end = boundary.detect_boundary(rom, addr, objdump=a.objdump)["recommendedEnd"]
+    else:
+        end = boundary.detect_boundary_arm(rom, addr)["recommendedEnd"]
     if end <= addr:
         raise SystemExit(f"resolved a non-positive range [{addr:#x}, {end:#x})")
     print(f"seed: entry {addr:#010x} ({mode}, end {end:#010x}, {end - addr} bytes) "
@@ -224,4 +205,5 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+
 

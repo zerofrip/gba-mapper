@@ -6,9 +6,9 @@ range is committed.
 Python port of the pilot project's TypeScript detector (same author),
 folded into the mapper to drop the Node dependency. Heuristics:
 
- - Epilogue detection: `pop {…, pc}`, `bx`, unconditional `b` kill
-   fall-through; the last one before pool/padding/next-prologue is the
-   candidate end.
+ - Epilogue detection: `pop {…, pc}` and `bx lr` kill fall-through.
+   Unconditional `b` is control flow, not an automatic function end.
+   `bx rN` (rN != lr) is not an epilogue.
  - Literal-pool detection: after an epilogue, 4-byte-aligned words
    whose top byte is a GBA memory region (0x02–0x08) belong to the
    function above.
@@ -78,9 +78,9 @@ def parse_disasm(text: str) -> list[dict]:
 def is_epilogue(i: dict) -> bool:
     if i["mnemonic"] == "pop" and re.search(r"\bpc\b", i["operands"]):
         return True
-    if i["mnemonic"] == "bx" and re.search(r"\b(lr|r\d+)\b", i["operands"]):
+    if i["mnemonic"] == "bx" and re.search(r"\blr\b", i["operands"]):
         return True
-    return i["mnemonic"] in ("b", "b.n", "b.w")
+    return False
 
 
 def call_target(i: dict) -> int | None:
@@ -118,19 +118,14 @@ def is_likely_pool_word(addr: int, lines: list[dict]) -> bool:
     return (word >> 24) & 0xFF in GBA_REGION_TOPS
 
 
-def detect_boundary(
-    rom: Path, start: int, proposed_end: int | None = None,
-    objdump: str = "arm-none-eabi-objdump",
+def detect_boundary_from_insns(
+    start: int, lines: list[dict], proposed_end: int | None = None,
 ) -> dict:
-    walk_end = start + MAX_WALK_BYTES
-    lines = [
-        l for l in parse_disasm(objdump_thumb(rom, start, walk_end, objdump))
-        if start <= l["addr"] < walk_end
-    ]
-    if not lines:
-        raise RuntimeError(f"no instructions disassembled in [{start:#x}, {walk_end:#x})")
-
+    """Thumb boundary walk over already-parsed insns (no objdump)."""
     warnings: list[str] = []
+    if not lines:
+        raise RuntimeError(f"no instructions disassembled from {start:#x}")
+
     first = lines[0]
     if (
         not is_push_lr(first)
@@ -142,6 +137,10 @@ def detect_boundary(
             f'(first insn: "{first["mnemonic"]} {first["operands"]}")'
         )
 
+    evidence: list[dict] = []
+    if is_push_lr(first):
+        evidence.append({"type": "prologue", "addr": start, "detail": "push lr"})
+
     call_targets: list[dict] = []
     candidates: list[dict] = []
     for i, insn in enumerate(lines):
@@ -150,11 +149,18 @@ def detect_boundary(
             call_targets.append({"from": insn["addr"], "to": to})
         if not is_epilogue(insn):
             continue
-        # Scan past pool words and padding for the next prologue.
+        evidence.append({
+            "type": "epilogue", "addr": insn["addr"],
+            "detail": f"{insn['mnemonic']} {insn['operands']}".strip(),
+        })
         j = i + 1
         while j < len(lines):
             probe = lines[j]
             if is_likely_pool_word(probe["addr"], lines):
+                evidence.append({
+                    "type": "literal-pool", "addr": probe["addr"],
+                    "detail": "word after epilogue",
+                })
                 j += 1
                 if (
                     len(probe["raw_bytes"]) != 8
@@ -175,7 +181,7 @@ def detect_boundary(
                         f"next-entry signal at {probe['addr']:#x}"
                     ),
                 })
-            break  # more code => mid-function return; resume the walk
+            break
 
     if candidates:
         first_pass_end = candidates[0]["end"]
@@ -188,7 +194,7 @@ def detect_boundary(
                 f"falling back to last epilogue end {first_pass_end:#x} — verify manually"
             )
         else:
-            first_pass_end = walk_end
+            first_pass_end = start + MAX_WALK_BYTES
             warnings.append(
                 f"no epilogue or next prologue within {MAX_WALK_BYTES} bytes of "
                 f"{start:#x}; wrong mode, unusual control flow, or wrong start"
@@ -199,6 +205,12 @@ def detect_boundary(
     if interior:
         earliest = min(interior, key=lambda c: c["to"])
         recommended_end = earliest["to"]
+        evidence.append({
+            "type": "interior-bl",
+            "addr": earliest["from"],
+            "target_addr": earliest["to"],
+            "detail": f"bl {earliest['from']:#x} -> {earliest['to']:#x}",
+        })
         warnings.append(
             f"INTERIOR CALL: bl {earliest['from']:#x} -> {earliest['to']:#x} is a "
             f"function entry inside the range; recommended end revised "
@@ -219,7 +231,120 @@ def detect_boundary(
         "callTargets": call_targets,
         "warnings": warnings,
         "proposedEnd": proposed_end,
+        "mode": "thumb",
+        "evidence": evidence,
     }
+
+
+def detect_boundary(
+    rom: Path, start: int, proposed_end: int | None = None,
+    objdump: str = "arm-none-eabi-objdump",
+) -> dict:
+    walk_end = start + MAX_WALK_BYTES
+    lines = [
+        l for l in parse_disasm(objdump_thumb(rom, start, walk_end, objdump))
+        if start <= l["addr"] < walk_end
+    ]
+    if not lines:
+        raise RuntimeError(f"no instructions disassembled in [{start:#x}, {walk_end:#x})")
+    return detect_boundary_from_insns(start, lines, proposed_end)
+
+
+def _u32(data: bytes, off: int) -> int | None:
+    if off < 0 or off + 4 > len(data):
+        return None
+    return int.from_bytes(data[off:off + 4], "little")
+
+
+def is_arm_prologue(word: int) -> bool:
+    """STMDB/STMFD sp!, {…} — stack setup evidence, not proof."""
+    return (word & 0x0FFF0000) == 0x092D0000
+
+
+def is_arm_epilogue(word: int) -> bool:
+    """LDM with pc, BX LR, MOV PC, LR. Unconditional B is not an epilogue."""
+    if (word & 0x0FFF8000) == 0x08BD8000:
+        return True  # LDMIA/LDMFD sp! {..., pc}
+    if (word & 0x0FFFFFFF) == 0x012FFF1E:
+        return True  # BX LR
+    if (word & 0x0FFFFFFF) == 0x01A0F00E:
+        return True  # MOV PC, LR
+    return False
+
+
+def detect_boundary_arm_bytes(
+    data: bytes, start: int, proposed_end: int | None = None,
+    *, vma: int | None = None,
+) -> dict:
+    """Conservative ARM boundary from raw bytes. No objdump.
+
+    Prologue/epilogue matches are evidence, not absolute proof.
+    Unconditional B does not terminate the function.
+    """
+    warnings: list[str] = []
+    _ = vma
+    evidence: list[dict] = []
+    walk = min(len(data), MAX_WALK_BYTES)
+    if walk < 4:
+        raise RuntimeError(f"no ARM bytes to walk from {start:#x}")
+
+    w0 = _u32(data, 0)
+    if w0 is not None and is_arm_prologue(w0):
+        evidence.append({"type": "prologue", "addr": start, "detail": "stmdb/stmfd sp!"})
+    elif w0 is not None:
+        warnings.append(
+            f"start {start:#x} has no STMDB/STMFD prologue (word {w0:#010x})"
+        )
+
+    epi_end = None
+    off = 0
+    while off + 4 <= walk:
+        addr = start + off
+        w = _u32(data, off)
+        if w is None:
+            break
+        if is_arm_epilogue(w):
+            evidence.append({"type": "epilogue", "addr": addr, "detail": f"{w:#010x}"})
+            epi_end = addr + 4
+            break
+        off += 4
+
+    if epi_end is not None:
+        recommended = epi_end
+    else:
+        recommended = start + walk
+        warnings.append(
+            f"no ARM epilogue (ldm pc / bx lr / mov pc,lr) within {walk} bytes of "
+            f"{start:#x}"
+        )
+
+    if proposed_end is not None and proposed_end != recommended:
+        rel = "past" if proposed_end > recommended else "short of"
+        warnings.append(
+            f"proposed end {proposed_end:#x} is {rel} detected boundary "
+            f"{recommended:#x} by {abs(proposed_end - recommended)} bytes"
+        )
+
+    return {
+        "start": start,
+        "recommendedEnd": recommended,
+        "candidates": [],
+        "callTargets": [],
+        "warnings": warnings,
+        "proposedEnd": proposed_end,
+        "mode": "arm",
+        "evidence": evidence,
+    }
+
+
+def detect_boundary_arm(
+    rom: Path, start: int, proposed_end: int | None = None,
+) -> dict:
+    raw = rom.read_bytes()
+    off = start - ROM_BASE
+    if off < 0 or off >= len(raw):
+        raise RuntimeError(f"ARM start {start:#x} outside ROM")
+    return detect_boundary_arm_bytes(raw[off:], start, proposed_end, vma=start)
 
 
 def _addr(s: str) -> int:
@@ -257,3 +382,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+

@@ -45,12 +45,18 @@ A `sha256` mismatch against the image is an error.
 `bl-target`, `blx-target`, `bx-target`, `gap`, `prologue`, `epilogue`,
 `cfg-consistency`, `interior-bl`, `ghidra-seed`, `gba-recomp-seed`,
 `decomp-reference`, `runtime-entry`, `manual-seed`, `hook`, `repoint`,
-`routine-pointer`, `encoding-roundtrip`, `skip-audit`, `peel-incbin`.
+`routine-pointer`, `encoding-roundtrip`, `skip-audit`, `peel-incbin`,
+`literal-pool`, `jump-table`, `indirect-branch`, `vector-entry`.
 
-Unknown types are preserved.
+Unknown types are preserved. Optional evidence fields (absent on
+Phase 1 records): `target_addr`, `source_mode`, `target_mode`.
+
+Do not rename existing type strings. `blx-target` is reserved;
+ARMv4T decode does not produce it. See [phase2-arm-thumb.md](phase2-arm-thumb.md).
 
 ## Producers in Phase 1
 
 - `tools/peel.py` — writes `.incbin` + labels.toml only. Does **not** record RANGE_VERIFIED.
 - `make check` then `tools/evidence.py record-range` (workflow / `seed_entry.py`) — SHA-256 match → `range_verified` + `peel-incbin`
 - `tools/seed_from_decomp.py` — ELF FUNC symbols → `unresolved` + `decomp-reference`; **does not write labels.toml**
+

@@ -10,9 +10,9 @@ workflow state.
 Each invocation:
   1. Reads [start, end) from the ROM.
   2. Runs arm-none-eabi-objdump on those bytes in the requested mode.
-  3. For thumb peels, fact-checks the proposed range with the boundary
-     detector (tools/boundary.py); refuses on blocking issues unless
-     --force-boundary.
+  3. Fact-checks the proposed range with the boundary detector
+     (Thumb: tools/boundary.py detect_boundary; ARM: detect_boundary_arm);
+     refuses on blocking issues unless --force-boundary.
   4. Emits `asm/disasm_0xADDR.s`: one arm/thumb_func_start block whose
      body is an `.incbin` of the original bytes (always byte-identical)
      with the disassembly above as @-comments.
@@ -86,6 +86,28 @@ def disassemble(rom: Path, start: int, end: int, mode: str, objdump: str) -> lis
         rest = re.split(r"\s*;\s*", m.group(3), maxsplit=1)[0].strip()
         out.append(f"{rel + ROM_BASE:#010x}: {m.group(2).strip():<10}  {rest}")
     return out
+
+
+def check_boundary_arm(rom: Path, start: int, end: int, *, force: bool) -> bool:
+    report = boundary.detect_boundary_arm(rom, start, end)
+    rec = report["recommendedEnd"]
+    blocking = []
+    if rec != end:
+        blocking.append(f"proposed end {end:#x} != detected recommended end {rec:#x}")
+    if not blocking:
+        print("boundary check passed", file=sys.stderr)
+        return True
+    print(f"boundary check: {len(blocking)} blocking issue(s):", file=sys.stderr)
+    for b in blocking:
+        print(f"  - {b}", file=sys.stderr)
+    for w in report["warnings"]:
+        print(f"  warning: {w}", file=sys.stderr)
+    if force:
+        print("--force-boundary set: proceeding despite issues", file=sys.stderr)
+        return True
+    print("refusing to peel; re-run with --force-boundary after manual review",
+          file=sys.stderr)
+    return False
 
 
 def check_boundary(rom: Path, start: int, end: int, *, force: bool, objdump: str) -> bool:
@@ -172,10 +194,14 @@ def main() -> int:
     name = a.name or f"sub_{a.start:08X}"
     out = Path(a.out) if a.out else tree / f"asm/disasm_{a.start:#010x}.s"
 
-    if a.mode == "thumb" and not a.no_boundary_check:
-        if not check_boundary(rom, a.start, a.end, force=a.force_boundary,
-                              objdump=a.objdump):
-            return 2
+    if not a.no_boundary_check:
+        if a.mode == "thumb":
+            if not check_boundary(rom, a.start, a.end, force=a.force_boundary,
+                                  objdump=a.objdump):
+                return 2
+        elif a.mode == "arm":
+            if not check_boundary_arm(rom, a.start, a.end, force=a.force_boundary):
+                return 2
 
     insns = disassemble(rom, a.start, a.end, a.mode, a.objdump)
     if not insns:
@@ -204,4 +230,5 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+
 

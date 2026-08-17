@@ -10,15 +10,15 @@ Method:
   1. Load the map (<rom stem>.labels.toml): coverage = union of
      [address, end) (entries without `end` cover conservatively to the
      next entry's address).
-  2. One objdump pass over the whole code span in thumb, one in arm:
-     harvest every bl/blx target FROM MAPPED RANGES (calls from code we
-     trust) that lands in UNMAPPED space — those are guaranteed-entry
-     candidates, evidence "bl-target".
+  2. Byte-decode each mapped range in its recorded ARM/Thumb mode
+     (tools/modeflow.py). Harvest statically known BL/BX/vector-entry
+     targets that land in unmapped space. Candidate identity is
+     (address, mode). Gap evidence is never labeled as a BL target.
   3. Gaps between consecutive mapped ranges inside the code span:
      candidate at the gap start (word-aligned), evidence "gap",
      screened by the boundary detector's pool/padding heuristics —
      gaps that are all literal-pool words or padding are dropped.
-  4. Rank: bl-targets first (by call count), then gaps by size
+  4. Rank: call-like targets first (by call count), then gaps by size
      ascending (small gaps between functions are most likely code).
 
 Output: JSON {codeSpan, mapped, coverageBytes, candidates: [{address,
@@ -31,14 +31,13 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
-import subprocess
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import boundary
 import labels_toml
+import modeflow
 from labels_toml import ROM_BASE
 
 
@@ -59,26 +58,6 @@ def leading_function(rom: Path, start: int, gap_hi: int, mode: str, objdump: str
     if prologue_warn or not (start < end <= gap_hi):
         return None
     return end
-
-_BL_RE = re.compile(r"^\s*([0-9a-f]+):\s+[0-9a-f ]+?\s+(bl|blx)\s+0x([0-9a-f]+)", re.I)
-
-
-def objdump_calls(rom: Path, start: int, end: int, thumb: bool, objdump: str) -> list[tuple[int, int]]:
-    """All (from, to) bl/blx pairs in [start, end), one subprocess."""
-    cmd = [
-        objdump, "-D", "-b", "binary", "-m", "arm7tdmi", "-EL",
-        f"--adjust-vma={ROM_BASE:#x}",
-        f"--start-address={start:#x}", f"--stop-address={end:#x}", str(rom),
-    ]
-    if thumb:
-        cmd.insert(6, "-Mforce-thumb")
-    text = subprocess.run(cmd, capture_output=True, text=True, check=True).stdout
-    out = []
-    for line in text.splitlines():
-        m = _BL_RE.match(line)
-        if m:
-            out.append((int(m.group(1), 16), int(m.group(3), 16)))
-    return out
 
 
 def pool_or_padding(rom_bytes: bytes, start: int, end: int) -> bool:
@@ -163,29 +142,53 @@ def main() -> int:
     def in_map(addr: int) -> bool:
         return any(s <= addr < e for s, e in merged)
 
-    # Call harvest: one pass per mode over the span; keep calls that
-    # originate inside a mapped range of that mode and land outside the
-    # map (and inside ROM).
-    candidates: dict[int, dict] = {}
-    for thumb in (True, False):
-        mode = "thumb" if thumb else "arm"
-        mode_ranges = [(s, e) for s, e, m in ranges if m == mode]
-        if not mode_ranges:
+    def already_candidate(addr: int) -> bool:
+        return any(a == addr for a, _ in cand_map)
+
+    # Call harvest: decode each mapped range in its own mode. Identity is
+    # (address, mode). Unresolved BX / B / pools / jump tables do not mint
+    # function candidates. Never copy source mode onto a BLX regex match.
+    cand_map: dict[tuple[int, str], dict] = {}
+    for s, e, mode in ranges:
+        chunk = rom_bytes[s - ROM_BASE : e - ROM_BASE]
+        if not chunk:
             continue
-        for src, dst in objdump_calls(a.rom, span_lo, span_hi, thumb, a.objdump):
-            if not any(s <= src < e for s, e in mode_ranges):
+        edges = modeflow.decode(chunk, s, mode)
+        minted = modeflow.candidates_from_edges(edges, len(rom_bytes))
+        for (addr, tmode), cand in minted.items():
+            if not (ROM_BASE <= addr < rom_end) or in_map(addr):
                 continue
-            if not (ROM_BASE <= dst < rom_end) or in_map(dst):
-                continue
-            # A bl in thumb code reaches a thumb function (blx would
-            # switch; record blx targets as the opposite mode).
-            c = candidates.setdefault(dst, {
-                "address": f"0x{dst:08x}", "mode": mode, "calls": 0,
-                "evidence": "",
-            })
-            c["calls"] += 1
-    for c in candidates.values():
-        c["evidence"] = f"bl-target ({c['calls']} call sites in mapped code)"
+            key = (addr, tmode)
+            if key not in cand_map:
+                src0 = cand.evidence[0] if cand.evidence else {}
+                etype = src0.get("type", "bl-target")
+                from_addr = src0.get("from_addr")
+                cand_map[key] = {
+                    "address": f"0x{addr:08x}",
+                    "mode": tmode,
+                    "evidence": etype,
+                    "evidence_type": etype,
+                    "source_mode": src0.get("source_mode"),
+                    "target_mode": tmode,
+                    "source": f"0x{from_addr:08x}" if from_addr is not None else None,
+                    "from_addr": f"0x{from_addr:08x}" if from_addr is not None else None,
+                    "calls": 1,
+                    "_evidence": list(cand.evidence),
+                    "conflicts": list(cand.conflicts),
+                }
+            else:
+                dst = cand_map[key]
+                dst["calls"] += 1
+                for ev in cand.evidence:
+                    if ev not in dst["_evidence"]:
+                        dst["_evidence"].append(ev)
+                for msg in cand.conflicts:
+                    if msg not in dst["conflicts"]:
+                        dst["conflicts"].append(msg)
+    for c in cand_map.values():
+        n = c["calls"]
+        et = c["evidence_type"]
+        c["evidence"] = f"{et} ({n} call sites in mapped code)"
 
     # Gaps. A gap of ANY size can begin with a function the static call
     # graph never reaches (computed-branch / jump-table targets), so a
@@ -224,7 +227,7 @@ def main() -> int:
         if size < 4:
             continue
         start = advance_past_known_data((gap_lo + 3) & ~3, gap_hi)
-        if start >= gap_hi or start in candidates or in_map(start):
+        if start >= gap_hi or already_candidate(start) or in_map(start):
             continue
         prev_mode = next((m for s, e, m in reversed(ranges) if e <= gap_lo), "thumb")
         if size <= 0x4000:
@@ -233,7 +236,10 @@ def main() -> int:
             evidence = f"gap of {size} bytes after mapped code (not pool/padding)"
             gaps.append({
                 "address": f"0x{start:08x}", "mode": prev_mode,
-                "evidence": evidence, "_size": size,
+                "evidence": evidence, "evidence_type": "gap",
+                "target_mode": prev_mode,
+                "source": None, "source_mode": None,
+                "_size": size,
             })
         else:
             # A large gap is often a long RUN of small functions reached
@@ -255,6 +261,9 @@ def main() -> int:
                         f"function in a {size}-byte gap "
                         f"({cur:#x}..{probe:#x}; computed-branch target)"
                     ),
+                    "evidence_type": "gap",
+                    "target_mode": prev_mode,
+                    "source": None, "source_mode": None,
                     "_size": probe - cur,
                 })
                 found += 1
@@ -264,12 +273,14 @@ def main() -> int:
                     nxt += 4
                 cur = nxt
 
-    ordered = sorted(candidates.values(), key=lambda c: -c["calls"])
+    ordered = sorted(cand_map.values(), key=lambda c: -c["calls"])
     # Gaps in ADDRESS order: a chained run through one large gap must peel
     # front-to-back so each incbin split is clean.
     ordered += sorted(gaps, key=lambda g: int(g["address"], 16))
     ordered = [c for c in ordered if int(c["address"], 16) not in skips]
     for c in ordered:
+        if "_evidence" in c:
+            c["evidence_items"] = c.pop("_evidence")
         c.pop("calls", None)
         c.pop("_size", None)
 
@@ -284,3 +295,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+

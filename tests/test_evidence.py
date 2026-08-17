@@ -181,6 +181,32 @@ class LabelsCompat(unittest.TestCase):
             self.assertEqual(fn.name, "AgbMain")
             self.assertFalse(hasattr(fn, "status"))
 
+    def test_optional_mode_fields_roundtrip_and_old_jsonl(self):
+        rec = _rec(evidence=[evidence.Evidence(
+            "bl-target", "modeflow", "bl",
+            from_addr=0x08001000, target_addr=0x08001200,
+            source_mode="thumb", target_mode="thumb",
+        )])
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "g.evidence.jsonl"
+            evidence.save(path, SHA, {rec.key(): rec})
+            _, loaded = evidence.load(path, SHA)
+            ev = loaded[rec.key()].evidence[0]
+            self.assertEqual(ev.target_addr, 0x08001200)
+            self.assertEqual(ev.source_mode, "thumb")
+            self.assertEqual(ev.target_mode, "thumb")
+            old = {
+                "address": "0x080001c8", "mode": "thumb",
+                "status": "unresolved",
+                "evidence": [{"type": "peel-incbin", "source": "peel", "detail": "range"}],
+                "conflicts": [],
+            }
+            parsed = evidence.Record.from_json(old)
+            self.assertIsNone(parsed.evidence[0].target_addr)
+            self.assertIsNone(parsed.evidence[0].source_mode)
+            self.assertIsNone(parsed.evidence[0].target_mode)
+
 
 if __name__ == "__main__":
     unittest.main()
+
