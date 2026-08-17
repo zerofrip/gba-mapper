@@ -76,4 +76,12 @@ ARMv4T decode does not produce it. See [phase2-arm-thumb.md](phase2-arm-thumb.md
   **not** produce RANGE_VERIFIED or ENCODING_VERIFIED. See
   [phase4-ghidra-import.md](phase4-ghidra-import.md).
 
+## Producers in Phase 5
+
+- `tools/evidence_merge.py` — unions frontier-compatible JSON on
+  `(address, mode)`. Provenance reconciliation only:
+  **agreement != verification**. Does **not** write labels.toml, the
+  sidecar, or gamedb, and does **not** produce RANGE_VERIFIED or
+  ENCODING_VERIFIED. See [phase5-evidence-merge.md](phase5-evidence-merge.md).
+
 
