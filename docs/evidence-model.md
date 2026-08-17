@@ -91,4 +91,18 @@ ARMv4T decode does not produce it. See [phase2-arm-thumb.md](phase2-arm-thumb.md
   RANGE_VERIFIED**. Does **not** write labels.toml, the sidecar, or
   gamedb. See [phase6-adjudication.md](phase6-adjudication.md).
 
+## Producers in Phase 7A
+
+- `tools/select_peel.py` — consumes adjudicated frontier data and
+  emits selection metadata only. It does **not** create verification
+  evidence, invent `end`, or run peel. See
+  [phase7-peel-selection.md](phase7-peel-selection.md).
+
+## Producers in Phase 7B
+
+- `tools/run_peel.py` — invokes existing `tools/peel.py` with an
+  explicit `[start, end)` keyed by `(address, mode)`. It does **not**
+  invent `end`, mutate Evidence, or record RANGE/ENCODING. See
+  [phase7b-peel-execution.md](phase7b-peel-execution.md).
+
 
