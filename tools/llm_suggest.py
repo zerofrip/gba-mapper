@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""LLM suggestion layer (fake provider). Not verification, not Evidence.
+"""LLM suggestion layer. Not verification, not Evidence.
 
 Reads Phase 7A skipped rows (agreed-seed / heuristic / conflicted) and
 emits a standalone suggestion artifact. Does not mint candidates,
@@ -10,7 +10,7 @@ change selection, or call peel/wire/RANGE.
     LLM suggestion != Evidence
 
 Usage:
-  python3 tools/llm_suggest.py INPUT [--output PATH] [--provider fake]
+  python3 tools/llm_suggest.py INPUT [--output PATH] [--provider fake|REAL]
 """
 from __future__ import annotations
 
@@ -40,6 +40,9 @@ _FORBIDDEN_FIELDS = frozenset({
 _SUGGEST_KEYS = frozenset({
     "address", "mode", "action", "rationale",
     "provider", "model", "prompt_version", "input_hash", "deterministic",
+})
+_OPTIONAL_ADDITIVE = frozenset({
+    "output_hash", "request_id", "temperature", "seed", "provider_version",
 })
 
 
@@ -162,6 +165,8 @@ def _validate_suggestion(raw, key: tuple[int, str], req: dict, meta: dict) -> di
         return None
     if (addr, mode) != key:
         return None
+    if raw.get("deterministic") is True:
+        return None
     out = {
         "address": req["address"],
         "mode": req["mode"],
@@ -173,10 +178,23 @@ def _validate_suggestion(raw, key: tuple[int, str], req: dict, meta: dict) -> di
         "input_hash": meta["input_hash"],
         "deterministic": False,
     }
-    extra = set(raw) - _SUGGEST_KEYS - {"rationale", "action", "address", "mode"}
-    # unknown extras ignored; already dropped forbidden
-    _ = extra
+    for k in _OPTIONAL_ADDITIVE:
+        if k in raw and k not in _FORBIDDEN_FIELDS:
+            out[k] = raw[k]
     return out
+
+
+def _resolve_provider(name: str) -> SuggestProvider:
+    if name == "fake":
+        return FakeProvider()
+    from llm_providers import MissingCredentialError, provider_for_name, real_provider_names
+
+    if name not in real_provider_names():
+        raise ValueError(f"unsupported provider: {name}")
+    try:
+        return provider_for_name(name)
+    except MissingCredentialError as exc:
+        raise ValueError(str(exc)) from exc
 
 
 def suggest(phase7a: dict, provider: SuggestProvider | None = None) -> dict:
@@ -186,6 +204,9 @@ def suggest(phase7a: dict, provider: SuggestProvider | None = None) -> dict:
         "model": getattr(prov, "model", "fixture"),
         "prompt_version": PROMPT_VERSION,
     }
+    pv = getattr(prov, "provider_version", None)
+    if pv:
+        meta_run["provider_version"] = pv
     suggestions: list[dict] = []
     errors: list[dict] = []
     requests: list[dict] = []
@@ -237,12 +258,18 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("input", type=Path, help="Phase 7A selection JSON")
     p.add_argument("--output", type=Path, help="write JSON here (default: stdout)")
-    p.add_argument("--provider", default="fake", help="suggestion provider (fake only)")
+    p.add_argument(
+        "--provider",
+        default="fake",
+        help="suggestion provider (default: fake; see docs/phase8c-real-llm.md)",
+    )
     a = p.parse_args(argv)
-    if a.provider != "fake":
-        p.error("--provider fake is the only supported value")
+    try:
+        provider = _resolve_provider(a.provider)
+    except ValueError as exc:
+        p.error(str(exc))
     phase7a = json.loads(a.input.read_text())
-    result = suggest(phase7a, FakeProvider())
+    result = suggest(phase7a, provider)
     blob = json.dumps(result, indent=2)
     if a.output is not None:
         a.output.write_text(blob + "\n")

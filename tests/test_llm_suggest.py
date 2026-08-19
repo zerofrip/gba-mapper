@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -261,6 +262,196 @@ class Boundary(unittest.TestCase):
             self.assertTrue(out.is_file())
             self.assertEqual(json.loads(out.read_text())["format"],
                              "gba-mapper-llm-suggestion")
+
+
+class Phase8CRealProvider(unittest.TestCase):
+    """Cassette-based real provider tests. No live network or credentials."""
+
+    def _cassette_fetch(self, *, url, headers, payload, request):
+        self.assertTrue(url.startswith("https://"))
+        self.assertNotIn("Authorization", headers)
+        user_msg = payload["messages"][1]["content"]
+        self.assertNotIn("INJECT", user_msg)
+        self.assertNotIn("detail", user_msg)
+        self.assertNotIn("deadbeef", user_msg)
+        self.assertNotIn("rom", user_msg.lower())
+        self.assertNotIn("/bin/", user_msg)
+        self.assertEqual(set(json.loads(user_msg)), {
+            "address", "mode", "disposition", "sources", "classes",
+            "evidence_types", "deterministic",
+        })
+        content = json.dumps({
+            "address": request["address"],
+            "mode": request["mode"],
+            "action": "possible-data",
+            "rationale": "cassette-fixture",
+            "provider_version": "8c-v1",
+        })
+        return json.dumps({"choices": [{"message": {"content": content}}]}).encode()
+
+    def _openai_provider(self, fetch=None, api_key="test-key-not-real"):
+        from llm_providers import OpenAiSuggestProvider
+        return OpenAiSuggestProvider(fetch=fetch or self._cassette_fetch, api_key=api_key)
+
+    def test_cassette_canonical_shape_and_metadata(self):
+        prov = self._openai_provider()
+        out = llm_suggest.suggest(doc(skipped=[skipped()]), prov)
+        s = out["suggestions"][0]
+        self.assertEqual(out["format"], "gba-mapper-llm-suggestion")
+        self.assertEqual(out["version"], 1)
+        self.assertEqual(out["run"]["provider"], "openai")
+        self.assertEqual(out["run"]["model"], "gpt-4o-mini")
+        self.assertEqual(out["run"]["prompt_version"], "7db-v1")
+        self.assertEqual(out["run"]["provider_version"], "8c-v1")
+        self.assertEqual(s["action"], "possible-data")
+        self.assertFalse(s["deterministic"])
+        self.assertEqual(s["provider"], "openai")
+        self.assertEqual(s["provider_version"], "8c-v1")
+        self.assertIn("input_hash", s)
+        self.assertIn("input_hash", out["run"])
+
+    def test_input_hash_unchanged_with_real_provider(self):
+        row = skipped()
+        req = llm_suggest.build_request(row)
+        expected = llm_suggest.input_hash(req)
+        out = llm_suggest.suggest(doc(skipped=[row]), self._openai_provider())
+        self.assertEqual(out["suggestions"][0]["input_hash"], expected)
+
+    def test_fake_provider_parity_unchanged(self):
+        out = llm_suggest.suggest(doc(skipped=[skipped(disposition="heuristic")]))
+        self.assertEqual(out["suggestions"][0]["action"], "possible-data")
+        self.assertEqual(out["run"]["provider"], "fake")
+
+    def test_forbidden_and_authoritative_fields_rejected(self):
+        forbidden_payloads = [
+            {"address": ADDR_HEX, "mode": "thumb", "action": "review", "end": "0x1"},
+            {"address": ADDR_HEX, "mode": "thumb", "action": "select-for-peel"},
+            {"address": ADDR_HEX, "mode": "thumb", "action": "review", "selection": "skipped"},
+            {"address": ADDR_HEX, "mode": "thumb", "action": "review", "winner": "thumb"},
+            {"address": ADDR_HEX, "mode": "thumb", "action": "review", "deterministic": True},
+        ]
+        dropped_extra = {
+            "address": ADDR_HEX, "mode": "thumb", "action": "review",
+            "rationale": "ok", "eligible-for-peel": True,
+        }
+
+        def make_fetch(content_obj):
+            def _fetch(**kwargs):
+                return json.dumps({
+                    "choices": [{"message": {"content": json.dumps(content_obj)}}],
+                }).encode()
+            return _fetch
+
+        for payload in forbidden_payloads:
+            with self.subTest(payload=payload):
+                out = llm_suggest.suggest(
+                    doc(skipped=[skipped()]),
+                    self._openai_provider(fetch=make_fetch(payload)),
+                )
+                self.assertEqual(out["suggestions"], [])
+                self.assertEqual(out["errors"][0]["error"], "invalid-suggestion")
+
+        out = llm_suggest.suggest(
+            doc(skipped=[skipped()]),
+            self._openai_provider(fetch=make_fetch(dropped_extra)),
+        )
+        self.assertEqual(len(out["suggestions"]), 1)
+        self.assertNotIn("eligible-for-peel", out["suggestions"][0])
+
+    def test_provider_failures_mapped(self):
+        cases = [
+            (lambda **kw: (_ for _ in ()).throw(TimeoutError("t")), "timeout"),
+            (lambda **kw: (_ for _ in ()).throw(RuntimeError("HTTP 500")), "provider-exception"),
+            (lambda **kw: b"not-json", "provider-exception"),
+            (lambda **kw: json.dumps({"choices": []}).encode(), "provider-exception"),
+            (lambda **kw: json.dumps({
+                "choices": [{"message": {"content": ""}}],
+            }).encode(), "provider-exception"),
+            (lambda **kw: json.dumps({
+                "choices": [{"message": {"content": "{}"}}],
+            }).encode(), "invalid-suggestion"),
+            (lambda **kw: json.dumps({
+                "choices": [{"message": {"content": json.dumps({
+                    "address": ADDR_HEX, "mode": "thumb", "action": "bogus",
+                })}}],
+            }).encode(), "invalid-suggestion"),
+        ]
+        for fetch, err in cases:
+            with self.subTest(err=err):
+                out = llm_suggest.suggest(
+                    doc(skipped=[skipped()]),
+                    self._openai_provider(fetch=fetch),
+                )
+                self.assertEqual(out["suggestions"], [])
+                self.assertEqual(out["errors"][0]["error"], err)
+
+    def test_secret_never_emitted(self):
+        secret = "sk-test-secret-must-not-leak-8c"
+        prov = self._openai_provider(api_key=secret)
+
+        def leaking_fetch(**kwargs):
+            if secret in json.dumps(kwargs):
+                pass
+            raise RuntimeError(f"boom {secret}")
+
+        prov_fail = self._openai_provider(fetch=leaking_fetch, api_key=secret)
+        out = llm_suggest.suggest(doc(skipped=[skipped()]), prov_fail)
+        blob = json.dumps(out)
+        self.assertNotIn(secret, blob)
+        out_ok = llm_suggest.suggest(doc(skipped=[skipped()]), prov)
+        self.assertNotIn(secret, json.dumps(out_ok))
+
+    def test_no_pipeline_modules_in_real_provider(self):
+        import llm_providers as mod
+        src = inspect.getsource(mod)
+        for token in (
+            "review_select", "eligibility_approve", "ends_approve",
+            "run_peel", "run_check", "record_range", "select_peel",
+            "adjudicate", "frontier",
+        ):
+            self.assertNotIn(token, src)
+        for token in ("import evidence", "from evidence"):
+            self.assertNotIn(token, src)
+
+    def test_llm_suggest_source_still_network_free(self):
+        src = inspect.getsource(llm_suggest)
+        self.assertNotIn("urllib", src)
+        self.assertNotIn("import requests", src)
+        self.assertNotIn("run_peel", src)
+        self.assertNotIn("ends_approve", src)
+        self.assertNotIn("eligibility_approve", src)
+
+    def test_cli_fake_default_and_unknown_provider(self):
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            src = td / "in.json"
+            src.write_text(json.dumps(doc(skipped=[skipped()])))
+            proc = subprocess.run(
+                [sys.executable, str(CLI), str(src)],
+                cwd=td, capture_output=True, text=True,
+            )
+            self.assertEqual(proc.returncode, 0)
+            self.assertEqual(json.loads(proc.stdout)["run"]["provider"], "fake")
+            bad = subprocess.run(
+                [sys.executable, str(CLI), str(src), "--provider", "unknown-vendor"],
+                cwd=td, capture_output=True, text=True,
+            )
+            self.assertNotEqual(bad.returncode, 0)
+            self.assertIn("unsupported provider", bad.stderr)
+
+    def test_cli_real_provider_missing_credential(self):
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            src = td / "in.json"
+            src.write_text(json.dumps(doc(skipped=[skipped()])))
+            env = {k: v for k, v in os.environ.items() if k != "OPENAI_API_KEY"}
+            proc = subprocess.run(
+                [sys.executable, str(CLI), str(src), "--provider", "openai"],
+                cwd=td, capture_output=True, text=True, env=env,
+            )
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertIn("OPENAI_API_KEY", proc.stderr)
+            self.assertNotIn("sk-", proc.stderr)
 
 
 if __name__ == "__main__":
